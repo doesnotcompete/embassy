@@ -26,13 +26,13 @@ pub struct InterruptHandler<T: Instance> {
 impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandler<T> {
     unsafe fn on_interrupt() {
         let regs = T::regs();
-        //let x = regs.istr().read().0;
-        //trace!("USB IRQ: {:08x}", x);
+        let x = regs.istr().read().0;
+        trace!("USB IRQ: {:08x}", x);
 
         let istr = regs.istr().read();
 
         if istr.susp() {
-            //trace!("USB IRQ: susp");
+            trace!("USB IRQ: susp");
             IRQ_SUSPEND.store(true, Ordering::Relaxed);
             regs.cntr().modify(|w| {
                 w.set_fsusp(true);
@@ -49,7 +49,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
         }
 
         if istr.wkup() {
-            //trace!("USB IRQ: wkup");
+            trace!("USB IRQ: wkup");
             IRQ_RESUME.store(true, Ordering::Relaxed);
             regs.cntr().modify(|w| {
                 w.set_fsusp(false);
@@ -66,7 +66,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
         }
 
         if istr.reset() {
-            //trace!("USB IRQ: reset");
+            trace!("USB IRQ: reset");
             IRQ_RESET.store(true, Ordering::Relaxed);
 
             // Write 0 to clear.

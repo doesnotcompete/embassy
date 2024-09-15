@@ -4,8 +4,9 @@
 use defmt::{panic, *};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_stm32::rcc::Hse;
+use embassy_stm32::rcc::{Hse, LsConfig};
 use embassy_stm32::time::Hertz;
+use embassy_stm32::ucpd::{self, Ucpd};
 use embassy_stm32::usb::{Driver, Instance};
 use embassy_stm32::{bind_interrupts, peripherals, usb, Config};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
@@ -14,7 +15,8 @@ use embassy_usb::Builder;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-OTG_HS => usb::InterruptHandler<peripherals::USB_OTG_HS>;
+    OTG_HS => usb::InterruptHandler<peripherals::USB_OTG_HS>;
+    UCPD1 => ucpd::InterruptHandler<peripherals::UCPD1>;
 });
 
 #[embassy_executor::main]
@@ -27,6 +29,8 @@ async fn main(_spawner: Spawner) {
         use embassy_stm32::rcc::*;
         config.rcc.hse = Some(Hse { freq: Hertz(24_000_000), mode: HseMode::Oscillator });
         config.rcc.hsi = Some(HSIPrescaler::DIV1);
+        config.rcc.ls = LsConfig { lsi: true, lse: None, rtc: RtcClockSource::LSI };
+        config.rcc.csi = true;
         config.rcc.hsi48 = Some(Hsi48Config { sync_from_usb: true });
         config.rcc.pll1 = Some(Pll {
             source: PllSource::HSE,
@@ -54,15 +58,20 @@ async fn main(_spawner: Spawner) {
         });
     }
 
+    config.enable_ucpd1_dead_battery = true;
+
     let p = embassy_stm32::init(config);
+
+    let mut ucpd = Ucpd::new(p.UCPD1, Irqs {}, p.PM0, p.PM1, Default::default());
+    ucpd.cc_phy().set_pull(ucpd::CcPull::Sink);
 
     // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
     let mut config = embassy_stm32::usb::Config::default();
 
-    config.vbus_detection = false;
+    config.vbus_detection = true;
 
-    let driver = Driver::new_hs(p.USB_OTG_HS, Irqs, p.PM6, p.PM5, &mut ep_out_buffer, config);
+    let driver = Driver::new_hs(p.USB_OTG_HS, Irqs {}, p.PM6, p.PM5, &mut ep_out_buffer, config);
 
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);

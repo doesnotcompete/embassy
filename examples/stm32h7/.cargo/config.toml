@@ -1,5 +1,9 @@
 [target.thumbv7em-none-eabihf]
+<<<<<<< Updated upstream
+runner = 'probe-rs run --chip STM32H723ZGTx --probe 0483:374e:003000193532511231333430'
+=======
 runner = 'probe-rs run --chip STM32H723ZGTx'
+>>>>>>> Stashed changes
 
 [build]
 target = "thumbv7em-none-eabihf" # Cortex-M4F and Cortex-M7F (with FPU)

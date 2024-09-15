@@ -5,7 +5,7 @@ pub use crate::pac::rcc::vals::{
     Hsidiv as HSIPrescaler, Plldiv as PllDiv, Pllm as PllPreDiv, Plln as PllMul, Pllsrc as PllSource, Sw as Sysclk,
 };
 use crate::pac::rcc::vals::{Pllrge, Pllvcosel, Timpre};
-use crate::pac::{FLASH, PWR, RCC};
+use crate::pac::{FLASH, PWR, RCC, USB_OTG_HS};
 use crate::time::Hertz;
 
 /// HSI speed
@@ -593,6 +593,10 @@ pub(crate) unsafe fn init(config: Config) {
             w.set_ppre4(config.apb4_pre);
             w.set_ppre5(config.apb5_pre);
         });
+        RCC.ahb1enr().modify(|w| {
+            w.set_usb_otg_hsen(true);
+            w.set_usbphycen(true);
+        });
     }
     #[cfg(stm32h5)]
     {
@@ -698,7 +702,7 @@ pub(crate) unsafe fn init(config: Config) {
         #[cfg(stm32h7rs)]
         clk48mohci: None, // TODO
         #[cfg(stm32h7rs)]
-        usb: None, // TODO
+        usb: Some(Hertz(48_000_000)), // TODO
     );
 }
 
@@ -769,7 +773,7 @@ fn init_pll(num: usize, config: Option<Pll>, input: &PllInput) -> PllOutput {
         if num == 0 {
             // on PLL1, DIVP must be even for most series.
             // The enum value is 1 less than the divider, so check it's odd.
-            #[cfg(not(pwr_h7rm0468))]
+            #[cfg(not(any(pwr_h7rm0468, stm32h7rs)))]
             assert!(div.to_bits() % 2 == 1);
             #[cfg(pwr_h7rm0468)]
             assert!(div.to_bits() % 2 == 1 || div.to_bits() == 0);

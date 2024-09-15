@@ -30,6 +30,7 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(
     quirk_setup_late_cnak: bool,
 ) {
     let ints = r.gintsts().read();
+    trace!("=== irqs {:08x}", ints);
     if ints.wkupint() || ints.usbsusp() || ints.usbrst() || ints.enumdne() || ints.otgint() || ints.srqint() {
         // Mask interrupts and notify `Bus` to process them
         r.gintmsk().write(|_| {});
@@ -530,12 +531,22 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
     /// Configures the PHY as a device.
     pub fn configure_as_device(&mut self) {
         let r = self.instance.regs;
+        r.grstctl().modify(|w| {
+            // Reset
+            while !r.grstctl().read().ahbidl() {}
+            w.set_csrst(true);
+        });
+
+        while r.grstctl().read().csrst() {}
         let phy_type = self.instance.phy_type;
         r.gusbcfg().write(|w| {
             // Force device mode
             w.set_fdmod(true);
             // Enable internal full-speed PHY
             w.set_physel(phy_type.internal() && !phy_type.high_speed());
+
+            w.set_tsdps(false);
+            w.set_trdt(0x9);
         });
     }
 
@@ -584,12 +595,42 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         });
     }
 
+    pub fn config_v4(&mut self) {
+        trace!("configuring v4");
+        let r = self.instance.regs;
+
+        r.gccfg_v3().modify(|w| {
+            w.set_vbvaloven(true);
+            w.set_vbvaloval(true);
+            w.set_vbden(self.config.vbus_detection);
+        });
+
+        // Force B-peripheral session
+        r.gotgctl().modify(|w| {
+            w.set_vbvaloen(!self.config.vbus_detection);
+            w.set_bvaloval(true);
+        });
+
+        r.gusbcfg().modify(|w| {
+            w.set_tocal(18);
+            w.set_trdt(0x9);
+            w.set_tsdps(false);
+        });
+
+        r.gahbcfg().modify(|w| {
+            w.set_ptxfelvl(true);
+        });
+    }
+
     fn init(&mut self) {
+        trace!("usb init");
         let r = self.instance.regs;
         let phy_type = self.instance.phy_type;
 
         // Soft disconnect.
         r.dctl().write(|w| w.set_sdis(true));
+
+        r.pcgcctl().write_value(regs::Pcgcctl(0));
 
         // Set speed.
         r.dcfg().write(|w| {
