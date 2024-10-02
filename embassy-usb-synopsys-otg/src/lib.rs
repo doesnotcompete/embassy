@@ -199,6 +199,7 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(
     }
 
     // Handle RX
+    #[cfg(not(feature = "dma"))]
     while r.gintsts().read().rxflvl() {
         let status = r.grxstsp().read();
         trace!("=== status {:08x}", status.0);
@@ -687,7 +688,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
             }
         });
 
-        r.doepmsk().modify(|w| {
+        r.doepmsk().write(|w| {
             w.set_stupm(true);
             w.set_xfrcm(true);
             // According to Zephyr driver, this must be cleared (unmasked) in buffer DMA mode
@@ -706,7 +707,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         // Unmask global interrupt
         r.gahbcfg().write(|w| {
             w.set_dmaen(cfg!(feature = "dma"));
-            w.set_hbstlen(0x5);
+            w.set_hbstlen(0x4);
             w.set_gint(true); // unmask global interrupt
         });
 
@@ -780,7 +781,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         for (index, ep) in self.ep_in.iter().enumerate() {
             if let Some(ep) = ep {
                 critical_section::with(|_| {
-                    regs.diepctl(index).modify(|w| {
+                    regs.diepctl(index).write(|w| {
                         #[cfg(feature = "dma")]
                         {
                             w.set_usbaep(true);
@@ -792,7 +793,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                             w.set_eptyp(to_eptyp(ep.ep_type));
                             w.set_sd0pid_sevnfrm(true);
                             w.set_txfnum(index as _);
-                            w.set_snak(true);
+                            // w.set_snak(true);
                         }
                     });
                     #[cfg(feature = "dma")]
@@ -855,7 +856,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                             w.set_dmaaddr(self.instance.state.ep_states[index].out_buffer.get() as u32);
                         }
                     });
-                    // regs.doepint(index).write_value(regs::Doepint(0xFB7F));
+                    regs.doepint(index).write_value(regs::Doepint(0xFB7F));
 
                     #[cfg(feature = "dma")]
                     {
@@ -1047,14 +1048,14 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                     // cancel transfer if active
                     if !enabled && regs.doepctl(ep_addr.index()).read().epena() {
                         regs.doepctl(ep_addr.index()).modify(|w| {
-                            w.set_snak(true);
+                            // w.set_snak(true);
                             w.set_epdis(true);
                         })
                     }
 
                     regs.doepctl(ep_addr.index()).modify(|w| {
                         w.set_usbaep(enabled);
-                        w.set_epena(true);
+                        w.set_epena(enabled);
                     });
 
                     // Flush tx fifo
@@ -1333,10 +1334,6 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
         //
         // Prevent the interrupt (which might poke FIFOs) from executing while copying data to FIFOs.
         critical_section::with(|_| {
-            #[cfg(feature = "dma")]
-            self.regs.diepdma(index).write(|w| {
-                w.set_dmaaddr(buf.as_ptr() as u32);
-            });
             // Setup transfer size
             self.regs.dieptsiz(index).write(|w| {
                 w.set_mcnt(1);
@@ -1419,7 +1416,19 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
                 // Receive 1 SETUP packet
                 self.regs.doeptsiz(self.ep_out.info.addr.index()).modify(|w| {
                     w.set_rxdpid_stupcnt(1);
+                    w.set_xfrsiz(8);
+                    w.set_pktcnt(1);
                 });
+
+                #[cfg(feature = "dma")]
+                {
+                    let addr = self.setup_state.setup_data.get() as u32;
+                    assert_eq!(core::mem::align_of_val(&self.setup_state.setup_data.get()), 4);
+                    debug!("configure setup DMA address: 0x{:04x}", addr);
+                    self.regs.doepdma(self.ep_out.info.addr.index()).modify(|w| {
+                        w.set_dmaaddr(addr);
+                    });
+                }
 
                 // Clear NAK to indicate we are ready to receive more data
                 if !self.quirk_setup_late_cnak {
