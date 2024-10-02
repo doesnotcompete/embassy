@@ -498,6 +498,7 @@ impl<'d, const MAX_EP_COUNT: usize> Driver<'d, MAX_EP_COUNT> {
                 max_packet_size,
                 interval_ms,
             },
+            control_state: &self.instance.state.cp_state,
         })
     }
 }
@@ -953,6 +954,10 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                 regs.gusbcfg().modify(|w| w.set_trdt(trdt));
 
                 regs.gintsts().write(|w| w.set_enumdne(true)); // clear
+                let status = regs.grxstsp().read();
+                trace!("=== status {:08x}", status.0);
+                let ep_num = status.epnum() as usize;
+                self.endpoint_set_enabled(EndpointAddress::from_parts(ep_num, Direction::Out), true);
                 self.restore_irqs();
 
                 return Poll::Ready(Event::Reset);
@@ -1074,12 +1079,13 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                     if !enabled && regs.diepctl(ep_addr.index()).read().epena() {
                         regs.diepctl(ep_addr.index()).modify(|w| {
                             w.set_snak(true); // set NAK
-                            w.set_epdis(true);
+                                              // w.set_epdis(true);
                         })
                     }
 
                     regs.diepctl(ep_addr.index()).modify(|w| {
                         w.set_usbaep(enabled);
+                        w.set_epena(enabled);
                         w.set_cnak(enabled); // clear NAK that might've been set by SNAK above.
                     })
                 });
@@ -1135,6 +1141,7 @@ pub struct Endpoint<'d, D> {
     regs: Otg,
     info: EndpointInfo,
     state: &'d EpState,
+    control_state: &'d ControlPipeSetupState,
 }
 
 impl<'d> embassy_usb_driver::Endpoint for Endpoint<'d, In> {
@@ -1202,21 +1209,28 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                     return Poll::Ready(Err(EndpointError::BufferOverflow));
                 }
 
-                #[cfg(not(feature = "dma"))]
-                {
-                    // SAFETY: exclusive access ensured by `out_size` atomic variable
-                    let data = unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) };
-                    buf[..len as usize].copy_from_slice(data);
-                }
+                // #[cfg(not(feature = "dma"))]
+                // {
+                // SAFETY: exclusive access ensured by `out_size` atomic variable
+                let data = if index == 0 {
+                    unsafe { core::slice::from_raw_parts(self.control_state.setup_data.get() as *mut u8, len as usize) }
+                } else {
+                    unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) }
+                };
+                buf[..len as usize].copy_from_slice(data);
+                // }
 
                 // Release buffer
                 self.state.out_size.store(EP_OUT_BUFFER_EMPTY, Ordering::Release);
 
                 critical_section::with(|_| {
                     #[cfg(feature = "dma")]
-                    self.regs.doepdma(index).write(|w| {
-                        w.set_dmaaddr(buf.as_ptr() as u32);
-                    });
+                    {
+                        assert_eq!(core::mem::align_of_val(&data.as_ptr()), 4);
+                        self.regs.doepdma(index).write(|w| {
+                            w.set_dmaaddr(data.as_ptr() as u32);
+                        });
+                    }
                     // Receive 1 packet
                     self.regs.doeptsiz(index).modify(|w| {
                         w.set_xfrsiz(self.info.max_packet_size as _);
@@ -1409,12 +1423,10 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
 
                 // Clear NAK to indicate we are ready to receive more data
                 if !self.quirk_setup_late_cnak {
-                    self.regs
-                        .doepctl(self.ep_out.info.addr.index())
-                        .modify(|w| {
-                            w.set_cnak(true);
-                            w.set_epena(true);
-                        });
+                    self.regs.doepctl(self.ep_out.info.addr.index()).modify(|w| {
+                        w.set_cnak(true);
+                        w.set_epena(true);
+                    });
                 }
 
                 trace!("SETUP received: {:?}", data);
