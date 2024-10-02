@@ -688,7 +688,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
             }
         });
 
-        r.doepmsk().write(|w| {
+        r.doepmsk().modify(|w| {
             w.set_stupm(true);
             w.set_xfrcm(true);
             // According to Zephyr driver, this must be cleared (unmasked) in buffer DMA mode
@@ -1234,7 +1234,18 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                     }
                     // Receive 1 packet
                     self.regs.doeptsiz(index).modify(|w| {
+                        w.set_pktcnt(1);
                         w.set_xfrsiz(self.info.max_packet_size as _);
+                        // ZLP
+                        if cfg!(feature = "dma") && index == 0 && len == 0 {
+                            debug!("configuring ZLP");
+                            w.set_rxdpid_stupcnt(1);
+                            w.set_xfrsiz(8);
+                            self.regs.doepdma(index).modify(|w| {
+                                w.set_dmaaddr(self.control_state.setup_data.get() as u32);
+                            });
+                        } else {
+                        }
                         w.set_pktcnt(1);
                     });
 
