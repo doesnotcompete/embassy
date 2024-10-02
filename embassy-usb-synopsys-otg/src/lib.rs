@@ -37,6 +37,151 @@ fn dma_setup_prepare(r: Otg, cp: &ControlPipeSetupState) {
     });
 }
 
+fn handle_setup_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r: Otg, state: &State<MAX_EP_COUNT>) {
+    trace!("SETUP_DATA_RX");
+
+    // flushing TX if something stuck in control endpoint
+    #[cfg(not(feature = "dma"))]
+    if r.dieptsiz(ep_num).read().pktcnt() != 0 {
+        r.grstctl().modify(|w| {
+            w.set_txfnum(ep_num as _);
+            w.set_txfflsh(true);
+        });
+        while r.grstctl().read().txfflsh() {}
+    }
+
+    if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
+        // SAFETY: exclusive access ensured by atomic bool
+        let data = unsafe { &mut *state.cp_state.setup_data.get() };
+        #[cfg(not(feature = "dma"))]
+        {
+            data[0..4].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
+            data[4..8].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
+        }
+        state.cp_state.setup_ready.store(true, Ordering::Release);
+        state.ep_states[0].out_waker.wake();
+    } else {
+        error!("received SETUP before previous finished processing");
+        // discard FIFO
+        r.fifo(0).read();
+        r.fifo(0).read();
+    }
+}
+
+fn handle_out_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r: Otg, state: &State<MAX_EP_COUNT>) {
+    trace!("OUT_DATA_RX ep={} len={}", ep_num, len);
+
+    if state.ep_states[ep_num].out_size.load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
+        #[cfg(not(feature = "dma"))]
+        {
+            // SAFETY: Buffer size is allocated to be equal to endpoint's maximum packet size
+            // We trust the peripheral to not exceed its configured MPSIZ
+            let buf = unsafe { core::slice::from_raw_parts_mut(*state.ep_states[ep_num].out_buffer.get(), len) };
+
+            for chunk in buf.chunks_mut(4) {
+                // RX FIFO is shared so always read from fifo(0)
+                let data = r.fifo(0).read().0;
+                chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
+            }
+        }
+
+        state.ep_states[ep_num].out_size.store(len as u16, Ordering::Release);
+        state.ep_states[ep_num].out_waker.wake();
+    } else {
+        error!("ep_out buffer overflow index={}", ep_num);
+
+        // discard FIFO data
+        let len_words = (len + 3) / 4;
+        for _ in 0..len_words {
+            r.fifo(0).read().data();
+        }
+    }
+}
+
+fn handle_in_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COUNT>) {
+    let mut ep_mask = r.daint().read().iepint();
+    let mut ep_num = 0;
+
+    // Iterate over endpoints while there are non-zero bits in the mask
+    while ep_mask != 0 {
+        if ep_mask & 1 != 0 {
+            let ep_ints = r.diepint(ep_num).read();
+
+            // clear all
+            r.diepint(ep_num).write_value(ep_ints);
+
+            // TXFE is cleared in DIEPEMPMSK
+            if ep_ints.txfe() {
+                critical_section::with(|_| {
+                    r.diepempmsk().modify(|w| {
+                        w.set_ineptxfem(w.ineptxfem() & !(1 << ep_num));
+                    });
+                });
+            }
+
+            state.ep_states[ep_num].in_waker.wake();
+            trace!("in ep={} irq val={:08x}", ep_num, ep_ints.0);
+        }
+
+        ep_mask >>= 1;
+        ep_num += 1;
+    }
+}
+
+fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COUNT>) {
+    info!("OEPINT");
+    let mut ep_mask = r.daint().read().oepint();
+    let mut ep_num = 0;
+    let status = r.grxstsp().read();
+    trace!("=== status {:08x}", status.0);
+    let len = status.bcnt() as usize;
+
+    while ep_mask != 0 {
+        if ep_mask & 1 != 0 {
+            let ep_ints = r.doepint(ep_num).read();
+            // clear all
+            r.doepint(ep_num).write_value(ep_ints);
+
+            if ep_ints.stpktrx() {
+                handle_setup_data_rx(ep_num, len, r, state);
+            }
+
+            if ep_ints.stup() {
+                debug!("setup done");
+                // handle_setup_data_done(ep_num, false, r);
+                state.cp_state.setup_ready.store(true, Ordering::Release);
+                state.ep_states[0].out_waker.wake();
+            }
+
+            if ep_ints.stsphsrx() {
+                trace!("status phase received received");
+            }
+
+            if ep_ints.xfrc() {
+                info!("transfer complete received");
+                handle_out_data_rx(ep_num, len, r, state);
+            }
+
+            trace!("out ep={} irq val={:08x}", ep_num, ep_ints.0);
+        }
+
+        ep_mask >>= 1;
+        ep_num += 1;
+    }
+}
+
+fn handle_setup_data_done(ep_num: usize, quirk_setup_late_cnak: bool, r: Otg) {
+    trace!("SETUP_DATA_DONE ep={}", ep_num);
+
+    if quirk_setup_late_cnak {
+        // Clear NAK to indicate we are ready to receive more data
+        r.doepctl(ep_num).modify(|w| {
+            w.set_cnak(true);
+            w.set_epena(true);
+        });
+    }
+}
+
 /// Handle interrupts.
 pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(
     r: Otg,
@@ -62,172 +207,25 @@ pub unsafe fn on_interrupt<const MAX_EP_COUNT: usize>(
         assert!(ep_num < ep_count);
 
         match status.pktstsd() {
-            vals::Pktstsd::SETUP_DATA_RX => {
-                trace!("SETUP_DATA_RX");
-                assert!(len == 8, "invalid SETUP packet length={}", len);
-                assert!(ep_num == 0, "invalid SETUP packet endpoint={}", ep_num);
-
-                // flushing TX if something stuck in control endpoint
-                // if r.dieptsiz(ep_num).read().pktcnt() != 0 {
-                //     r.grstctl().modify(|w| {
-                //         w.set_txfnum(ep_num as _);
-                //         w.set_txfflsh(true);
-                //     });
-                //     while r.grstctl().read().txfflsh() {}
-                // }
-
-                if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
-                    // SAFETY: exclusive access ensured by atomic bool
-                    let data = unsafe { &mut *state.cp_state.setup_data.get() };
-                    #[cfg(not(feature = "dma"))]
-                    {
-                        data[0..4].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
-                        data[4..8].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
-                    }
-                    state.cp_state.setup_ready.store(true, Ordering::Release);
-                    state.ep_states[0].out_waker.wake();
-                } else {
-                    error!("received SETUP before previous finished processing");
-                    // discard FIFO
-                    r.fifo(0).read();
-                    r.fifo(0).read();
-                }
-            }
-            vals::Pktstsd::OUT_DATA_RX => {
-                trace!("OUT_DATA_RX ep={} len={}", ep_num, len);
-
-                if state.ep_states[ep_num].out_size.load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
-                    #[cfg(not(feature = "dma"))]
-                    {
-                        // SAFETY: Buffer size is allocated to be equal to endpoint's maximum packet size
-                        // We trust the peripheral to not exceed its configured MPSIZ
-                        let buf =
-                            unsafe { core::slice::from_raw_parts_mut(*state.ep_states[ep_num].out_buffer.get(), len) };
-
-                        for chunk in buf.chunks_mut(4) {
-                            // RX FIFO is shared so always read from fifo(0)
-                            let data = r.fifo(0).read().0;
-                            chunk.copy_from_slice(&data.to_ne_bytes()[0..chunk.len()]);
-                        }
-                    }
-
-                    state.ep_states[ep_num].out_size.store(len as u16, Ordering::Release);
-                    state.ep_states[ep_num].out_waker.wake();
-                } else {
-                    error!("ep_out buffer overflow index={}", ep_num);
-
-                    // discard FIFO data
-                    let len_words = (len + 3) / 4;
-                    for _ in 0..len_words {
-                        r.fifo(0).read().data();
-                    }
-                }
-            }
+            vals::Pktstsd::SETUP_DATA_RX => handle_setup_data_rx(ep_num, len, r, state),
+            vals::Pktstsd::OUT_DATA_RX => handle_out_data_rx(ep_num, len, r, state),
             vals::Pktstsd::OUT_DATA_DONE => {
                 trace!("OUT_DATA_DONE ep={}", ep_num);
             }
-            vals::Pktstsd::SETUP_DATA_DONE => {
-                trace!("SETUP_DATA_DONE ep={}", ep_num);
-
-                if quirk_setup_late_cnak {
-                    // Clear NAK to indicate we are ready to receive more data
-                    r.doepctl(ep_num).modify(|w| {
-                        w.set_cnak(true);
-                        w.set_epena(true);
-                    });
-                }
-            }
+            vals::Pktstsd::SETUP_DATA_DONE => handle_setup_data_done(ep_num, quirk_setup_late_cnak, r),
             x => trace!("unknown PKTSTS: {}", x.to_bits()),
         }
     }
 
     // IN endpoint interrupt
     if ints.iepint() {
-        let mut ep_mask = r.daint().read().iepint();
-        let mut ep_num = 0;
-
-        // Iterate over endpoints while there are non-zero bits in the mask
-        while ep_mask != 0 {
-            if ep_mask & 1 != 0 {
-                let ep_ints = r.diepint(ep_num).read();
-
-                // clear all
-                r.diepint(ep_num).write_value(ep_ints);
-
-                // TXFE is cleared in DIEPEMPMSK
-                if ep_ints.txfe() {
-                    critical_section::with(|_| {
-                        r.diepempmsk().modify(|w| {
-                            w.set_ineptxfem(w.ineptxfem() & !(1 << ep_num));
-                        });
-                    });
-                }
-
-                state.ep_states[ep_num].in_waker.wake();
-                trace!("in ep={} irq val={:08x}", ep_num, ep_ints.0);
-            }
-
-            ep_mask >>= 1;
-            ep_num += 1;
-        }
+        handle_in_ep_int(r, state);
     }
 
     // not needed? reception handled in rxflvl
     // OUT endpoint interrupt
     if ints.oepint() {
-        info!("OEPINT");
-        let mut ep_mask = r.daint().read().oepint();
-        let mut ep_num = 0;
-        let status = r.grxstsp().read();
-        trace!("=== status {:08x}", status.0);
-        let len = status.bcnt() as usize;
-
-        while ep_mask != 0 {
-            if ep_mask & 1 != 0 {
-                let ep_ints = r.doepint(ep_num).read();
-                // clear all
-                r.doepint(ep_num).write_value(ep_ints);
-
-                if ep_ints.stpktrx() {
-                    debug!("setup received");
-                    if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
-                        let data = unsafe { &mut *state.cp_state.setup_data.get() };
-                        #[cfg(not(feature = "dma"))]
-                        {
-                            data[0..4].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
-                            data[4..8].copy_from_slice(&r.fifo(0).read().0.to_ne_bytes());
-                        }
-                        state.cp_state.setup_ready.store(true, Ordering::Release);
-                        state.ep_states[0].out_waker.wake();
-                    } else {
-                        warn!("setup received early");
-                        r.fifo(0).read();
-                        r.fifo(0).read();
-                    }
-                }
-
-                if ep_ints.stup() {
-                    debug!("setup done");
-                    state.cp_state.setup_ready.store(true, Ordering::Release);
-                    state.ep_states[0].out_waker.wake();
-                }
-
-                if ep_ints.stsphsrx() {
-                    trace!("status phase received received");
-                }
-
-                if ep_ints.xfrc() {
-                    info!("transfer complete received");
-                    state.ep_states[ep_num].out_size.store(len as u16, Ordering::Release);
-                }
-
-                state.ep_states[ep_num].out_waker.wake();
-                trace!("out ep={} irq val={:08x}", ep_num, ep_ints.0);
-            }
-
-            ep_mask >>= 1;
-            ep_num += 1;
-        }
+        handle_out_ep_int(r, state);
     }
 }
 
