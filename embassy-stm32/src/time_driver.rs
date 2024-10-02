@@ -598,6 +598,6 @@ pub(crate) fn get_driver() -> &'static RtcDriver {
     &DRIVER
 }
 
-pub(crate) fn init(cs: CriticalSection) {
+pub fn init(cs: CriticalSection) {
     DRIVER.init(cs)
 }

@@ -179,6 +179,7 @@ pub struct UsbBufferReport {
 }
 
 /// Main struct for the USB device stack.
+#[repr(align(4))]
 pub struct UsbDevice<'d, D: Driver<'d>> {
     control_buf: &'d mut [u8],
     control: D::ControlPipe,
@@ -354,6 +355,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
 
     async fn handle_control_in(&mut self, req: Request) {
         const DEVICE_DESCRIPTOR_LEN: usize = 18;
+        trace!("CORE: control in {:?}", req);
 
         let mut resp_length = req.length as usize;
         let max_packet_size = self.control.max_packet_size();
@@ -391,6 +393,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     }
 
     async fn handle_control_out(&mut self, req: Request) {
+        trace!("CORE: control out {:?}", req);
         let req_length = req.length as usize;
         let max_packet_size = self.control.max_packet_size();
         let mut total = 0;
@@ -500,6 +503,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
     fn handle_control_out(&mut self, req: Request, data: &[u8]) -> OutResponse {
         const CONFIGURATION_NONE_U16: u16 = CONFIGURATION_NONE as u16;
         const CONFIGURATION_VALUE_U16: u16 = CONFIGURATION_VALUE as u16;
+        trace!("CORE: handle control out {:?}", req);
 
         match (req.request_type, req.recipient) {
             (RequestType::Standard, Recipient::Device) => match (req.request, req.value) {
@@ -619,6 +623,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
     }
 
     fn handle_control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> InResponse<'a> {
+        trace!("CORE: handle control in {:?}", req);
         match (req.request_type, req.recipient) {
             (RequestType::Standard, Recipient::Device) => match req.request {
                 Request::GET_STATUS => {
@@ -716,6 +721,7 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
     }
 
     fn handle_get_descriptor<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> InResponse<'a> {
+        trace!("CORE: desc {:?}", req);
         let (dtype, index) = req.descriptor_type_index();
 
         match dtype {

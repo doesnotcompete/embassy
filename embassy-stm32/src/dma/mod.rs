@@ -120,7 +120,7 @@ pub struct NoDma;
 impl_peripheral!(NoDma);
 
 // safety: must be called only once at startup
-pub(crate) unsafe fn init(
+pub unsafe fn init(
     cs: critical_section::CriticalSection,
     #[cfg(bdma)] bdma_priority: interrupt::Priority,
     #[cfg(dma)] dma_priority: interrupt::Priority,
