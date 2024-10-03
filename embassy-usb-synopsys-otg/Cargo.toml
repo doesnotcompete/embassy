@@ -23,3 +23,6 @@ embassy-usb-driver = {version = "0.1.0", path = "../embassy-usb-driver" }
 
 defmt = { version = "0.3", optional = true }
 log = { version = "0.4.14", optional = true }
+
+[features]
+dma = []

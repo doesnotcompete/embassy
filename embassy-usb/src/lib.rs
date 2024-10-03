@@ -179,6 +179,7 @@ pub struct UsbBufferReport {
 }
 
 /// Main struct for the USB device stack.
+#[repr(align(4))]
 pub struct UsbDevice<'d, D: Driver<'d>> {
     control_buf: &'d mut [u8],
     control: D::ControlPipe,
