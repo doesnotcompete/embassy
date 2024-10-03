@@ -40,6 +40,7 @@ pub enum Recipient {
 /// A control request read from a SETUP packet.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(align(4))]
 pub struct Request {
     /// Direction of the request.
     pub direction: Direction,
@@ -128,6 +129,7 @@ impl Request {
 /// Response for a CONTROL OUT request.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(align(4))]
 pub enum OutResponse {
     /// The request was accepted.
     Accepted,
@@ -138,6 +140,7 @@ pub enum OutResponse {
 /// Response for a CONTROL IN request.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(align(4))]
 pub enum InResponse<'a> {
     /// The request was accepted. The buffer contains the response data.
     Accepted(&'a [u8]),

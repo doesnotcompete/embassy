@@ -43,6 +43,7 @@ pub mod capability_type {
 /// cast into `u8` to get the bmAttributes synchronization type bits.
 /// Values other than `NoSynchronization` are only allowed on isochronous endpoints.
 #[repr(u8)]
+#[repr(align(4))]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum SynchronizationType {
@@ -60,6 +61,7 @@ pub enum SynchronizationType {
 /// `u8` to get the bmAttributes usage type bits.
 /// Values other than `DataEndpoint` are only allowed on isochronous endpoints.
 #[repr(u8)]
+#[repr(align(4))]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum UsageType {
@@ -74,6 +76,7 @@ pub enum UsageType {
 }
 
 /// A writer for USB descriptors.
+#[repr(align(4))]
 pub(crate) struct DescriptorWriter<'a> {
     pub buf: &'a mut [u8],
     position: usize,
@@ -364,6 +367,7 @@ pub(crate) fn device_qualifier_descriptor(config: &Config) -> [u8; 10] {
 }
 
 /// A writer for Binary Object Store descriptor.
+#[repr(align(4))]
 pub struct BosWriter<'a> {
     pub(crate) writer: DescriptorWriter<'a>,
     num_caps_mark: Option<usize>,

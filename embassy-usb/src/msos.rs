@@ -10,6 +10,7 @@ use crate::types::InterfaceNumber;
 /// A serialized Microsoft OS 2.0 Descriptor set.
 ///
 /// Create with [`DeviceDescriptorSetBuilder`].
+#[repr(align(4))]
 pub struct MsOsDescriptorSet<'d> {
     descriptor: &'d [u8],
     vendor_code: u8,
@@ -38,6 +39,7 @@ impl<'d> MsOsDescriptorSet<'d> {
 }
 
 /// Writes a Microsoft OS 2.0 Descriptor set into a buffer.
+#[repr(align(4))]
 pub struct MsOsDescriptorWriter<'d> {
     buf: &'d mut [u8],
 
@@ -255,6 +257,7 @@ unsafe fn transmute_write_to<T: Sized>(t: &T, buf: &mut [u8]) {
 /// Table 9. Microsoft OS 2.0 descriptor wDescriptorType values.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
+#[repr(align(4))]
 pub enum DescriptorType {
     /// MS OS descriptor set header
     SetHeaderDescriptor = 0,

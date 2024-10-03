@@ -167,6 +167,7 @@ struct Interface {
 /// A report of the used size of the runtime allocated buffers
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(align(4))]
 pub struct UsbBufferReport {
     /// Number of config descriptor bytes used
     pub config_descriptor_used: usize,
@@ -186,6 +187,7 @@ pub struct UsbDevice<'d, D: Driver<'d>> {
     inner: Inner<'d, D>,
 }
 
+#[repr(align(4))]
 struct Inner<'d, D: Driver<'d>> {
     bus: D::Bus,
 

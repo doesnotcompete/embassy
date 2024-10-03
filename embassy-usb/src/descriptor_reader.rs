@@ -6,6 +6,7 @@ use crate::types::InterfaceNumber;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct ReadError;
 
+#[repr(align(4))]
 pub struct Reader<'a> {
     data: &'a [u8],
 }
@@ -43,6 +44,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[repr(align(4))]
 pub struct DescriptorIter<'a, 'b> {
     r: &'a mut Reader<'b>,
 }
@@ -74,6 +76,7 @@ impl<'a, 'b> Iterator for DescriptorIter<'a, 'b> {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[repr(align(4))]
 pub struct EndpointInfo {
     pub configuration: u8,
     pub interface: InterfaceNumber,

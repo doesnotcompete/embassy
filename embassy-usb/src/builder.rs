@@ -10,6 +10,7 @@ use crate::{Handler, Interface, UsbDevice, MAX_INTERFACE_COUNT, STRING_INDEX_CUS
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
+#[repr(align(4))]
 /// Configuration used when creating [`UsbDevice`].
 pub struct Config<'a> {
     pub(crate) vendor_id: u16,
@@ -120,6 +121,7 @@ impl<'a> Config<'a> {
 }
 
 /// [`UsbDevice`] builder.
+#[repr(align(4))]
 pub struct Builder<'d, D: Driver<'d>> {
     config: Config<'d>,
     handlers: Vec<&'d mut dyn Handler, MAX_HANDLER_COUNT>,
@@ -286,6 +288,7 @@ impl<'d, D: Driver<'d>> Builder<'d, D> {
 /// A function is a logical grouping of interfaces that perform a given USB function.
 /// If [`Config::composite_with_iads`] is set, each function will have an IAD descriptor.
 /// If not, functions will not be visible as descriptors.
+#[repr(align(4))]
 pub struct FunctionBuilder<'a, 'd, D: Driver<'d>> {
     builder: &'a mut Builder<'d, D>,
     iface_count_index: Option<usize>,
@@ -341,6 +344,7 @@ impl<'a, 'd, D: Driver<'d>> FunctionBuilder<'a, 'd, D> {
 }
 
 /// Interface builder.
+#[repr(align(4))]
 pub struct InterfaceBuilder<'a, 'd, D: Driver<'d>> {
     builder: &'a mut Builder<'d, D>,
     interface_number: InterfaceNumber,
@@ -392,6 +396,7 @@ impl<'a, 'd, D: Driver<'d>> InterfaceBuilder<'a, 'd, D> {
 }
 
 /// Interface alternate setting builder.
+#[repr(align(4))]
 pub struct InterfaceAltBuilder<'a, 'd, D: Driver<'d>> {
     builder: &'a mut Builder<'d, D>,
     interface_number: InterfaceNumber,
