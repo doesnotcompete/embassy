@@ -33,6 +33,7 @@ fn dma_setup_prepare(r: Otg, cp: &ControlPipeSetupState) {
     });
     r.doepctl(0).modify(|w| {
         w.set_epena(true);
+        w.set_cnak(true);
         w.set_usbaep(true);
     });
 }
@@ -50,7 +51,7 @@ fn handle_setup_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r:
         while r.grstctl().read().txfflsh() {}
     }
 
-    if cfg!(feature = "dma") || state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
+    if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
         // SAFETY: exclusive access ensured by atomic bool
         let data = unsafe { &mut *state.cp_state.setup_data.get() };
         #[cfg(not(feature = "dma"))]
@@ -145,7 +146,7 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
             if ep_ints.stup() {
                 debug!("setup done");
                 // handle_setup_data_done(ep_num, false, r);
-                dma_setup_prepare(r, &state.cp_state);
+                // dma_setup_prepare(r, &state.cp_state);
                 state.cp_state.setup_ready.store(true, Ordering::Release);
                 state.ep_states[0].out_waker.wake();
             }
@@ -161,7 +162,7 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
             if ep_ints.xfrc() {
                 info!("transfer complete received");
 
-                if ep_num == 0 {
+                if cfg!(feature = "dma") && ep_num == 0 {
                     dma_setup_prepare(r, &state.cp_state);
                 }
 
@@ -341,6 +342,7 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[repr(align(4))]
 struct EndpointData {
     ep_type: EndpointType,
     max_packet_size: u16,
@@ -571,6 +573,7 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Driver<'d> for Driver<'d
 }
 
 /// USB bus.
+#[repr(align(4))]
 pub struct Bus<'d, const MAX_EP_COUNT: usize> {
     config: Config,
     ep_in: [Option<EndpointData>; MAX_EP_COUNT],
@@ -840,33 +843,35 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                         if cfg!(feature = "dma") {
                             dma_setup_prepare(regs, &self.instance.state.cp_state);
                         }
+                    } else {
+                        regs.doepdma(index).modify(|w| {
+                            // TODO: Use some sort of global ringbuffer to get address of
+                            // setup buffer
+                            // NOTE: With this, I at least see the device descriptor response back on
+                            // the host (although it then triggers a bus reset)
+                            if index == 0 {
+                                let addr = self.instance.state.cp_state.setup_data.get();
+                                assert_eq!(core::mem::align_of_val(&addr), 4);
+                                debug!("configure setup address: {}", addr);
+                                w.set_dmaaddr(addr as u32);
+                            } else {
+                                assert_eq!(
+                                    core::mem::align_of_val(&self.instance.state.ep_states[index].out_buffer.get()),
+                                    4
+                                );
+                                w.set_dmaaddr(self.instance.state.ep_states[index].out_buffer.get() as u32);
+                            }
+                        });
                     }
-                    regs.doepdma(index).modify(|w| {
-                        // TODO: Use some sort of global ringbuffer to get address of
-                        // setup buffer
-                        // NOTE: With this, I at least see the device descriptor response back on
-                        // the host (although it then triggers a bus reset)
-                        if index == 0 {
-                            let addr = self.instance.state.cp_state.setup_data.get();
-                            assert_eq!(core::mem::align_of_val(&addr), 4);
-                            debug!("configure setup address: {}", addr);
-                            w.set_dmaaddr(addr as u32);
-                        } else {
-                            assert_eq!(
-                                core::mem::align_of_val(&self.instance.state.ep_states[index].out_buffer.get()),
-                                4
-                            );
-                            w.set_dmaaddr(self.instance.state.ep_states[index].out_buffer.get() as u32);
-                        }
-                    });
 
-                    // #[cfg(feature = "dma")]
-                    // {
-                    //     regs.doepctl(index).modify(|w| {
-                    //         // Receive one packet
-                    //         w.set_cnak(true);
-                    //     });
-                    // }
+                    #[cfg(feature = "dma")]
+                    {
+                        regs.doepctl(index).modify(|w| {
+                            // Receive one packet
+                            w.set_cnak(true);
+                            w.set_epena(true);
+                        });
+                    }
                 });
             }
         }
@@ -1056,14 +1061,17 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                     });
 
                     // Flush tx fifo
-                    regs.grstctl().write(|w| {
-                        w.set_txfflsh(true);
-                        w.set_txfnum(ep_addr.index() as _);
-                    });
-                    loop {
-                        let x = regs.grstctl().read();
-                        if !x.txfflsh() {
-                            break;
+                    #[cfg(not(feature = "dma"))]
+                    {
+                        regs.grstctl().write(|w| {
+                            w.set_txfflsh(true);
+                            w.set_txfnum(ep_addr.index() as _);
+                        });
+                        loop {
+                            let x = regs.grstctl().read();
+                            if !x.txfflsh() {
+                                break;
+                            }
                         }
                     }
                 });
@@ -1134,6 +1142,7 @@ impl Dir for Out {
 }
 
 /// USB endpoint.
+#[repr(align(4))]
 pub struct Endpoint<'d, D> {
     _phantom: PhantomData<D>,
     regs: Otg,
@@ -1385,6 +1394,7 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
 }
 
 /// USB control pipe.
+#[repr(align(4))]
 pub struct ControlPipe<'d> {
     max_packet_size: u16,
     regs: Otg,
@@ -1405,25 +1415,23 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
 
             if self.setup_state.setup_ready.load(Ordering::Acquire) {
                 let data = unsafe { *self.setup_state.setup_data.get() };
+                // TODO: We probably need more slots/some sort of ring-buffer
                 self.setup_state.setup_ready.store(false, Ordering::Release);
 
                 // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
-                // Receive 1 SETUP packet
-                self.regs.doeptsiz(self.ep_out.info.addr.index()).modify(|w| {
-                    w.set_rxdpid_stupcnt(1);
-                    w.set_xfrsiz(8);
-                    w.set_pktcnt(1);
-                });
 
-                #[cfg(feature = "dma")]
-                {
-                    let addr = self.setup_state.setup_data.get() as u32;
-                    assert_eq!(core::mem::align_of_val(&self.setup_state.setup_data.get()), 4);
-                    debug!("configure setup DMA address: 0x{:04x}", addr);
-                    self.regs.doepdma(self.ep_out.info.addr.index()).modify(|w| {
-                        w.set_dmaaddr(addr);
-                    });
-                }
+                // #[cfg(feature = "dma")]
+                // {
+                //     let addr = self.setup_state.setup_data.get() as u32;
+                //     assert_eq!(core::mem::align_of_val(&self.setup_state.setup_data.get()), 4);
+                //     debug!("configure setup DMA address: 0x{:04x}", addr);
+                //     self.regs.doepdma(self.ep_out.info.addr.index()).modify(|w| {
+                //         w.set_dmaaddr(addr);
+                //     });
+                // }
+
+                // For non-DMA mode, this also prepares the next packet
+                dma_setup_prepare(self.regs, &self.setup_state);
 
                 // Clear NAK to indicate we are ready to receive more data
                 if !self.quirk_setup_late_cnak {
@@ -1473,7 +1481,7 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
     }
 
     async fn reject(&mut self) {
-        trace!("control: reject");
+        warn!("control: reject");
 
         // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
         self.regs.diepctl(self.ep_in.info.addr.index()).modify(|w| {
@@ -1538,6 +1546,7 @@ fn ep0_mpsiz(max_packet_size: u16) -> u16 {
 }
 
 /// Hardware-dependent USB IP configuration.
+#[repr(align(4))]
 pub struct OtgInstance<'d, const MAX_EP_COUNT: usize> {
     /// The USB peripheral.
     pub regs: Otg,
