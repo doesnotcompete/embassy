@@ -71,6 +71,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         dp: impl Peripheral<P = impl DpPin<T>> + 'd,
         dm: impl Peripheral<P = impl DmPin<T>> + 'd,
         ep_out_buffer: &'d mut [u8],
+        ep_in_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
         into_ref!(dp, dm);
@@ -92,7 +93,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         };
 
         Self {
-            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            inner: OtgDriver::new(ep_out_buffer, ep_in_buffer, instance, config),
             phantom: PhantomData,
         }
     }
@@ -110,6 +111,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         dp: impl Peripheral<P = impl DpPin<T>> + 'd,
         dm: impl Peripheral<P = impl DmPin<T>> + 'd,
         ep_out_buffer: &'d mut [u8],
+        ep_in_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
         into_ref!(dp, dm);
@@ -131,7 +133,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         };
 
         Self {
-            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            inner: OtgDriver::new(ep_out_buffer, ep_in_buffer, instance, config),
             phantom: PhantomData,
         }
     }
@@ -159,6 +161,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         ulpi_d6: impl Peripheral<P = impl UlpiD6Pin<T>> + 'd,
         ulpi_d7: impl Peripheral<P = impl UlpiD7Pin<T>> + 'd,
         ep_out_buffer: &'d mut [u8],
+        ep_in_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
         config_ulpi_pins!(
@@ -180,7 +183,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         };
 
         Self {
-            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            inner: OtgDriver::new(ep_out_buffer, ep_in_buffer, instance, config),
             phantom: PhantomData,
         }
     }
@@ -208,6 +211,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         ulpi_d6: impl Peripheral<P = impl UlpiD6Pin<T>> + 'd,
         ulpi_d7: impl Peripheral<P = impl UlpiD7Pin<T>> + 'd,
         ep_out_buffer: &'d mut [u8],
+        ep_in_buffer: &'d mut [u8],
         config: Config,
     ) -> Self {
         assert!(T::HIGH_SPEED == true, "Peripheral is not capable of high-speed USB");
@@ -231,7 +235,7 @@ impl<'d, T: Instance> Driver<'d, T> {
         };
 
         Self {
-            inner: OtgDriver::new(ep_out_buffer, instance, config),
+            inner: OtgDriver::new(ep_out_buffer, ep_in_buffer, instance, config),
             phantom: PhantomData,
         }
     }

@@ -32,8 +32,6 @@ fn dma_setup_prepare(r: Otg, cp: &ControlPipeSetupState) {
         w.set_dmaaddr(cp.setup_data.get() as u32);
     });
     r.doepctl(0).modify(|w| {
-        w.set_epena(true);
-        w.set_cnak(true);
         w.set_usbaep(true);
     });
 }
@@ -72,6 +70,10 @@ fn handle_setup_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r:
 fn handle_out_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r: Otg, state: &State<MAX_EP_COUNT>) {
     trace!("OUT_DATA_RX ep={} len={}", ep_num, len);
 
+    // if ep_num == 0 {
+    //     state.cp_state.setup_ready.store(true, Ordering::Release);
+    //     state.ep_states[ep_num].out_waker.wake();
+    // } 
     if state.ep_states[ep_num].out_size.load(Ordering::Acquire) == EP_OUT_BUFFER_EMPTY {
         #[cfg(not(feature = "dma"))]
         {
@@ -162,9 +164,9 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
             if ep_ints.xfrc() {
                 info!("transfer complete received");
 
-                if cfg!(feature = "dma") && ep_num == 0 {
-                    dma_setup_prepare(r, &state.cp_state);
-                }
+                // if cfg!(feature = "dma") && ep_num == 0 {
+                //     dma_setup_prepare(r, &state.cp_state);
+                // }
 
                 handle_out_data_rx(ep_num, len, r, state);
             }
@@ -291,6 +293,8 @@ struct EpState {
     /// Buffers are ready when associated [State::ep_out_size] != [EP_OUT_BUFFER_EMPTY].
     out_buffer: UnsafeCell<*mut u8>,
     out_size: AtomicU16,
+    in_buffer: UnsafeCell<*mut u8>,
+    in_size: AtomicU16,
 }
 
 // SAFETY: The EndpointAllocator ensures that the buffer points to valid memory exclusive for each endpoint and is
@@ -321,13 +325,17 @@ impl<const EP_COUNT: usize> State<EP_COUNT> {
     /// Create a new State.
     pub const fn new() -> Self {
         const NEW_AW: AtomicWaker = AtomicWaker::new();
-        const NEW_BUF: UnsafeCell<*mut u8> = UnsafeCell::new(0 as _);
-        const NEW_SIZE: AtomicU16 = AtomicU16::new(EP_OUT_BUFFER_EMPTY);
+        const NEW_OUT_BUF: UnsafeCell<*mut u8> = UnsafeCell::new(0 as _);
+        const NEW_OUT_SIZE: AtomicU16 = AtomicU16::new(EP_OUT_BUFFER_EMPTY);
+        const NEW_IN_BUF: UnsafeCell<*mut u8> = UnsafeCell::new(0 as _);
+        const NEW_IN_SIZE: AtomicU16 = AtomicU16::new(EP_OUT_BUFFER_EMPTY);
         const NEW_EP_STATE: EpState = EpState {
             in_waker: NEW_AW,
             out_waker: NEW_AW,
-            out_buffer: NEW_BUF,
-            out_size: NEW_SIZE,
+            out_buffer: NEW_OUT_BUF,
+            out_size: NEW_OUT_SIZE,
+            in_buffer: NEW_IN_BUF,
+            in_size: NEW_IN_SIZE,
         };
 
         Self {
@@ -395,6 +403,8 @@ pub struct Driver<'d, const MAX_EP_COUNT: usize> {
     ep_out: [Option<EndpointData>; MAX_EP_COUNT],
     ep_out_buffer: &'d mut [u8],
     ep_out_buffer_offset: usize,
+    ep_in_buffer: &'d mut [u8],
+    ep_in_buffer_offset: usize,
     instance: OtgInstance<'d, MAX_EP_COUNT>,
 }
 
@@ -408,13 +418,15 @@ impl<'d, const MAX_EP_COUNT: usize> Driver<'d, MAX_EP_COUNT> {
     /// Endpoint allocation will fail if it is too small.
     /// * `instance` - The USB OTG peripheral instance and its configuration.
     /// * `config` - The USB driver configuration.
-    pub fn new(ep_out_buffer: &'d mut [u8], instance: OtgInstance<'d, MAX_EP_COUNT>, config: Config) -> Self {
+    pub fn new(ep_out_buffer: &'d mut [u8], ep_in_buffer: &'d mut [u8], instance: OtgInstance<'d, MAX_EP_COUNT>, config: Config) -> Self {
         Self {
             config,
             ep_in: [None; MAX_EP_COUNT],
             ep_out: [None; MAX_EP_COUNT],
             ep_out_buffer,
             ep_out_buffer_offset: 0,
+            ep_in_buffer,
+            ep_in_buffer_offset: 0,
             instance,
         }
     }
@@ -442,6 +454,11 @@ impl<'d, const MAX_EP_COUNT: usize> Driver<'d, MAX_EP_COUNT> {
         if D::dir() == Direction::Out {
             if self.ep_out_buffer_offset + max_packet_size as usize >= self.ep_out_buffer.len() {
                 error!("Not enough endpoint out buffer capacity");
+                return Err(EndpointAllocError);
+            }
+        } else {
+            if self.ep_in_buffer_offset + max_packet_size as usize >= self.ep_in_buffer.len() {
+                error!("Not enough endpoint in buffer capacity");
                 return Err(EndpointAllocError);
             }
         };
@@ -495,6 +512,20 @@ impl<'d, const MAX_EP_COUNT: usize> Driver<'d, MAX_EP_COUNT> {
             unsafe {
                 *state.out_buffer.get() = self.ep_out_buffer.as_mut_ptr().offset(self.ep_out_buffer_offset as _);
             }
+            self.ep_out_buffer_offset += max_packet_size as usize;
+            assert_eq!(
+                core::mem::align_of_val(&state.out_buffer.get()),
+                4
+            );
+        } else {
+            // Buffer capacity check was done above, now allocation cannot fail
+            unsafe {
+                *state.in_buffer.get() = self.ep_in_buffer.as_mut_ptr().offset(self.ep_in_buffer_offset as _);
+            }
+            assert_eq!(
+                core::mem::align_of_val(&state.in_buffer.get()),
+                4
+            );
             self.ep_out_buffer_offset += max_packet_size as usize;
         }
 
@@ -592,7 +623,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
             w.set_iepint(true);
             w.set_oepint(true);
             w.set_rxflvlm(!cfg!(feature = "dma"));
-            w.set_srqim(true);
+            // w.set_srqim(true);
             w.set_otgint(true);
         });
     }
@@ -711,6 +742,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
         // Unmask transfer complete EP interrupt
         r.diepmsk().write(|w| {
             w.set_xfrcm(true);
+            w.set_tom(true);
         });
 
         // Unmask and clear core interrupts
@@ -808,7 +840,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                     #[cfg(feature = "dma")]
                     {
                         regs.diepctl(index).modify(|w| {
-                            w.set_cnak(true);
+                            // w.set_cnak(true);
                             w.set_usbaep(true);
                         });
                     }
@@ -849,21 +881,13 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                             // setup buffer
                             // NOTE: With this, I at least see the device descriptor response back on
                             // the host (although it then triggers a bus reset)
-                            if index == 0 {
-                                let addr = self.instance.state.cp_state.setup_data.get();
-                                assert_eq!(core::mem::align_of_val(&addr), 4);
-                                debug!("configure setup address: {}", addr);
-                                w.set_dmaaddr(addr as u32);
-                            } else {
-                                assert_eq!(
-                                    core::mem::align_of_val(&self.instance.state.ep_states[index].out_buffer.get()),
-                                    4
-                                );
-                                w.set_dmaaddr(self.instance.state.ep_states[index].out_buffer.get() as u32);
-                            }
+                            assert_eq!(
+                                core::mem::align_of_val(&self.instance.state.ep_states[index].out_buffer.get()),
+                                4
+                            );
+                            w.set_dmaaddr(self.instance.state.ep_states[index].out_buffer.get() as u32);
                         });
                     }
-
                     #[cfg(feature = "dma")]
                     {
                         regs.doepctl(index).modify(|w| {
@@ -872,6 +896,7 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
                             w.set_epena(true);
                         });
                     }
+
                 });
             }
         }
@@ -1016,7 +1041,14 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                 state.ep_states[ep_addr.index()].in_waker.wake();
             }
         }
-        dma_setup_prepare(regs, &self.instance.state.cp_state);
+        #[cfg(feature = "dma")]
+        {
+            dma_setup_prepare(regs, &self.instance.state.cp_state);
+            regs.doepctl(0).modify(|w| {
+                w.set_epena(true);
+                w.set_cnak(true);
+            });
+        }
     }
 
     fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
@@ -1050,7 +1082,7 @@ impl<'d, const MAX_EP_COUNT: usize> embassy_usb_driver::Bus for Bus<'d, MAX_EP_C
                     // cancel transfer if active
                     if !enabled && regs.doepctl(ep_addr.index()).read().epena() {
                         regs.doepctl(ep_addr.index()).modify(|w| {
-                            w.set_snak(true);
+                            // w.set_snak(true);
                             w.set_epdis(true);
                         })
                     }
@@ -1219,11 +1251,11 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                 // #[cfg(not(feature = "dma"))]
                 // {
                 // SAFETY: exclusive access ensured by `out_size` atomic variable
-                // let data = if index == 0 {
-                //     unsafe { core::slice::from_raw_parts(self.control_state.setup_data.get() as *mut u8, len as usize) }
-                // } else {
-                let data = unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) };
-                // };
+                let data = if index == 0 {
+                    unsafe { core::slice::from_raw_parts(self.control_state.setup_data.get() as *mut u8, len as usize) }
+                } else {
+                    unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) }
+                };
                 buf[..len as usize].copy_from_slice(data);
                 // }
 
@@ -1362,10 +1394,14 @@ impl<'d> embassy_usb_driver::EndpointIn for Endpoint<'d, In> {
                 });
             }
 
-            #[cfg(feature = "dma")]
+            // #[cfg(feature = "dma")]
             {
-                let addr = buf.as_ptr() as u32;
-                assert_eq!(core::mem::align_of_val(&buf), 4);
+                let in_buf = unsafe { core::slice::from_raw_parts_mut(*self.state.in_buffer.get(), buf.len()) };
+                self.state.in_size.store(buf.len() as u16, Ordering::Release);
+                in_buf.copy_from_slice(buf);
+
+                let addr = in_buf.as_ptr() as u32;
+                assert_eq!(core::mem::align_of_val(&in_buf), 4);
                 trace!("configure DMA address: 0x{:04x}", addr);
                 self.regs.diepdma(index).modify(|w| {
                     w.set_dmaaddr(addr);
