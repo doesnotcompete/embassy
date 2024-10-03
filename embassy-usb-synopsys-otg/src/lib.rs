@@ -50,7 +50,7 @@ fn handle_setup_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r:
         while r.grstctl().read().txfflsh() {}
     }
 
-    if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
+    if cfg!(feature = "dma") || state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
         // SAFETY: exclusive access ensured by atomic bool
         let data = unsafe { &mut *state.cp_state.setup_data.get() };
         #[cfg(not(feature = "dma"))]
@@ -142,13 +142,10 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
             // clear all
             r.doepint(ep_num).write_value(ep_ints);
 
-            if ep_ints.stpktrx() {
-                handle_setup_data_rx(ep_num, len, r, state);
-            }
-
             if ep_ints.stup() {
                 debug!("setup done");
                 // handle_setup_data_done(ep_num, false, r);
+                dma_setup_prepare(r, &state.cp_state);
                 state.cp_state.setup_ready.store(true, Ordering::Release);
                 state.ep_states[0].out_waker.wake();
             }
@@ -157,8 +154,17 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
                 trace!("status phase received received");
             }
 
+            if ep_ints.stpktrx() {
+                handle_setup_data_rx(ep_num, len, r, state);
+            }
+
             if ep_ints.xfrc() {
                 info!("transfer complete received");
+
+                if ep_num == 0 {
+                    dma_setup_prepare(r, &state.cp_state);
+                }
+
                 handle_out_data_rx(ep_num, len, r, state);
             }
 
@@ -380,6 +386,7 @@ impl Default for Config {
 }
 
 /// USB OTG driver.
+#[repr(align(4))]
 pub struct Driver<'d, const MAX_EP_COUNT: usize> {
     config: Config,
     ep_in: [Option<EndpointData>; MAX_EP_COUNT],
@@ -688,6 +695,9 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
             }
         });
 
+        // TODO: In non-DMA mode, a lot of transfer handling is done in `rxflvl`, merge this with
+        // DMA handling
+        #[cfg(feature = "dma")]
         r.doepmsk().write(|w| {
             w.set_stupm(true);
             w.set_xfrcm(true);
@@ -823,17 +833,14 @@ impl<'d, const MAX_EP_COUNT: usize> Bus<'d, MAX_EP_COUNT> {
 
                     regs.doeptsiz(index).modify(|w| {
                         w.set_xfrsiz(ep.max_packet_size as _);
-                        if index == 0 {
-                            // why? it does seem to be necessary though
-                            if cfg!(feature = "dma") {
-                                dma_setup_prepare(regs, &self.instance.state.cp_state);
-                            } else {
-                                w.set_rxdpid_stupcnt(1);
-                            }
-                        } else {
-                            w.set_pktcnt(1);
-                        }
+                        w.set_pktcnt(1);
                     });
+                    if index == 0 {
+                        // why? it does seem to be necessary though
+                        if cfg!(feature = "dma") {
+                            dma_setup_prepare(regs, &self.instance.state.cp_state);
+                        }
+                    }
                     regs.doepdma(index).modify(|w| {
                         // TODO: Use some sort of global ringbuffer to get address of
                         // setup buffer
@@ -1206,7 +1213,7 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                 // let data = if index == 0 {
                 //     unsafe { core::slice::from_raw_parts(self.control_state.setup_data.get() as *mut u8, len as usize) }
                 // } else {
-                    let data = unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) };
+                let data = unsafe { core::slice::from_raw_parts(*self.state.out_buffer.get(), len as usize) };
                 // };
                 buf[..len as usize].copy_from_slice(data);
                 // }
@@ -1226,7 +1233,6 @@ impl<'d> embassy_usb_driver::EndpointOut for Endpoint<'d, Out> {
                     self.regs.doeptsiz(index).modify(|w| {
                         w.set_pktcnt(1);
                         w.set_xfrsiz(self.info.max_packet_size as _);
-                        // TODO: ZLP handling required?
                     });
 
                     if self.info.ep_type == EndpointType::Isochronous {
@@ -1397,7 +1403,7 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
         poll_fn(|cx| {
             self.ep_out.state.out_waker.register(cx.waker());
 
-            if self.setup_state.setup_ready.load(Ordering::Relaxed) {
+            if self.setup_state.setup_ready.load(Ordering::Acquire) {
                 let data = unsafe { *self.setup_state.setup_data.get() };
                 self.setup_state.setup_ready.store(false, Ordering::Release);
 
