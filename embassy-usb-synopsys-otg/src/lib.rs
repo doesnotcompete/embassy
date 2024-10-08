@@ -49,7 +49,7 @@ fn handle_setup_data_rx<const MAX_EP_COUNT: usize>(ep_num: usize, len: usize, r:
         while r.grstctl().read().txfflsh() {}
     }
 
-    if state.cp_state.setup_ready.load(Ordering::Relaxed) == false {
+    if state.cp_state.setup_ready.load(Ordering::Acquire) == false {
         // SAFETY: exclusive access ensured by atomic bool
         let data = unsafe { &mut *state.cp_state.setup_data.get() };
         #[cfg(not(feature = "dma"))]
@@ -148,7 +148,7 @@ fn handle_out_ep_int<const MAX_EP_COUNT: usize>(r: Otg, state: &State<MAX_EP_COU
             if ep_ints.stup() {
                 debug!("setup done");
                 // handle_setup_data_done(ep_num, false, r);
-                // dma_setup_prepare(r, &state.cp_state);
+                dma_setup_prepare(r, &state.cp_state);
                 state.cp_state.setup_ready.store(true, Ordering::Release);
                 state.ep_states[0].out_waker.wake();
             }
@@ -1451,8 +1451,6 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
 
             if self.setup_state.setup_ready.load(Ordering::Acquire) {
                 let data = unsafe { *self.setup_state.setup_data.get() };
-                // TODO: We probably need more slots/some sort of ring-buffer
-                self.setup_state.setup_ready.store(false, Ordering::Release);
 
                 // EP0 should not be controlled by `Bus` so this RMW does not need a critical section
 
@@ -1476,6 +1474,9 @@ impl<'d> embassy_usb_driver::ControlPipe for ControlPipe<'d> {
                         w.set_epena(true);
                     });
                 }
+
+                // TODO: We probably need more slots/some sort of ring-buffer
+                self.setup_state.setup_ready.store(false, Ordering::Release);
 
                 trace!("SETUP received: {:?}", data);
                 Poll::Ready(data)
